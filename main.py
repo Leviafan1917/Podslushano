@@ -17,7 +17,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # Хранилища
-user_states = {}
 user_history = {}
 active_moderation = {}
 # Множество для предотвращения одновременной обработки одного и того же сообщения
@@ -27,42 +26,10 @@ processing_now = set()
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     text = (
-        "📋 **Меню управления:**\n\n"
-        "🔹 /send — Предложить новый пост\n"
-        "🔹 /delete — Отменить последний предложенный пост\n"
-        "🔹 /info — Посмотреть правила и лимиты\n\n"
-        "Нажмите на нужную команду выше 👆"
+        "👋 Привет! **Отправьте пост** (текст, фото или видео) прямо сюда, "
+        "и он, возможно, будет опубликован в канале."
     )
     await message.answer(text, parse_mode="Markdown")
-
-
-@dp.message(Command("info"))
-async def cmd_info(message: types.Message):
-    rules = (
-        "ℹ️ **Информация:**\n\n"
-        f"• Лимит: **{LIMIT_POSTS} постов** за **{LIMIT_WINDOW // 60} минут**.\n"
-        "• После отправки ваш пост попадает в очередь модерации.\n"
-        "• Если модератор нажмет «Да», пост сразу выйдет в канале."
-    )
-    await message.answer(rules, parse_mode="Markdown")
-
-
-@dp.message(Command("send"))
-async def cmd_send(message: types.Message):
-    user_id = message.from_user.id
-    current_time = time.time()
-
-    if user_id not in user_history:
-        user_history[user_id] = []
-
-    user_history[user_id] = [t for t in user_history[user_id] if current_time - t < LIMIT_WINDOW]
-
-    if len(user_history[user_id]) >= LIMIT_POSTS:
-        wait_time = int(LIMIT_WINDOW - (current_time - user_history[user_id][0]))
-        return await message.answer(f"⏳ Лимит! Вы сможете отправить пост через {wait_time} сек.")
-
-    user_states[user_id] = "waiting"
-    await message.answer("📥 Пришлите контент (текст, фото или видео) для публикации.")
 
 
 @dp.message(Command("delete"))
@@ -81,41 +48,60 @@ async def cmd_delete(message: types.Message):
 
 @dp.message(F.chat.type == "private")
 async def handle_message(message: types.Message):
+    # Игнорируем команды, чтобы они не улетали как посты
+    if message.text and message.text.startswith('/'):
+        return
+
     user_id = message.from_user.id
+    current_time = time.time()
 
-    if user_states.get(user_id) == "waiting":
-        user_history[user_id].append(time.time())
-        sent_content = await message.copy_to(chat_id=ADRES)
+    # --- Проверка лимитов ---
+    if user_id not in user_history:
+        user_history[user_id] = []
 
-        builder = InlineKeyboardBuilder()
-        builder.add(types.InlineKeyboardButton(
-            text="Да ✅",
-            callback_data=f"p:y:{user_id}:{sent_content.message_id}:{message.message_id}")
-        )
-        builder.add(types.InlineKeyboardButton(
-            text="Нет ❌",
-            callback_data=f"p:n:{user_id}:{sent_content.message_id}:{message.message_id}")
-        )
+    # Очистка старых записей
+    user_history[user_id] = [t for t in user_history[user_id] if current_time - t < LIMIT_WINDOW]
 
-        sent_buttons = await bot.send_message(
-            chat_id=ADRES,
-            text=f"📩 **Новое предложение от пользователя**",
-            reply_to_message_id=sent_content.message_id,
-            reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
-        )
+    if len(user_history[user_id]) >= LIMIT_POSTS:
+        wait_time = int(LIMIT_WINDOW - (current_time - user_history[user_id][0]))
+        return await message.answer(f"⏳ Лимит! Вы сможете отправить пост через {wait_time} сек.")
+    # ------------------------
 
-        if user_id not in active_moderation:
-            active_moderation[user_id] = []
-        active_moderation[user_id].append({
-            "content": sent_content.message_id,
-            "buttons": sent_buttons.message_id
-        })
+    # Фиксируем время отправки
+    user_history[user_id].append(time.time())
 
-        user_states[user_id] = None
-        await message.answer("✅ Принято! Отправлено на модерацию.")
-    elif not (message.text and message.text.startswith('/')):
-        await message.answer("⚠️ Чтобы отправить пост, используйте /send.")
+    # Отправка на модерацию
+    sent_content = await message.copy_to(chat_id=ADRES)
+
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(
+        text="Да ✅",
+        callback_data=f"p:y:{user_id}:{sent_content.message_id}:{message.message_id}")
+    )
+    builder.add(types.InlineKeyboardButton(
+        text="Нет ❌",
+        callback_data=f"p:n:{user_id}:{sent_content.message_id}:{message.message_id}")
+    )
+
+    sent_buttons = await bot.send_message(
+        chat_id=ADRES,
+        text=f"📩 **Новое предложение от пользователя**",
+        reply_to_message_id=sent_content.message_id,
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+
+    if user_id not in active_moderation:
+        active_moderation[user_id] = []
+    active_moderation[user_id].append({
+        "content": sent_content.message_id,
+        "buttons": sent_buttons.message_id
+    })
+
+    await message.answer(
+        "✅ Ваш пост отправлен на модерацию.\n\n"
+        "Для удаления последнего предложенного поста используйте команду /delete"
+    )
 
 
 @dp.callback_query(F.data.startswith("p:"))
@@ -150,7 +136,7 @@ async def decision_handler(callback: types.CallbackQuery):
     processing_now.add(content_id)
 
     try:
-        # Убираем кнопки СРАЗУ, чтобы никто больше не нажал
+        # Убираем кнопки СРАЗУ
         await callback.message.edit_reply_markup(reply_markup=None)
 
         # Удаляем из активных СРАЗУ
